@@ -1,0 +1,33 @@
+name: Build DYNEX
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build DYNEX.dylib
+        run: |
+          mkdir -p build
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang \
+            -arch arm64 -isysroot "$SDK" -miphoneos-version-min=13.0 \
+            -dynamiclib -fobjc-arc -fvisibility=hidden -O2 -Wall \
+            -I include -I src \
+            src/*.m \
+            -framework Foundation -framework UIKit \
+            -install_name @rpath/DYNEX.dylib \
+            -o build/DYNEX.dylib
+          file build/DYNEX.dylib
+          ls -lh build/DYNEX.dylib
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: DYNEX-dylib
+          path: build/DYNEX.dylib
