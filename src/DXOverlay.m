@@ -336,6 +336,7 @@ static UIWindow *DXFindGameWindow(UIWindow *except, BOOL keyOnly) {
             break;
         }
     }
+} // <--- Thêm dấu đóng ngoặc này vào là chuẩn chỉnh!
 
 - (void)setCount:(NSUInteger)n {
     if (!_main) return;
