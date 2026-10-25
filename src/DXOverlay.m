@@ -165,6 +165,7 @@ static UIWindow *DXFindGameWindow(UIWindow *except, BOOL keyOnly) {
 - (void)setDefaultFractionX:(CGFloat)fx y:(CGFloat)fy;
 - (void)applyFraction;
 - (void)setCount:(NSUInteger)n;
+- (void)sleepIfNeeded;
 - (void)wake;
 @end
 
