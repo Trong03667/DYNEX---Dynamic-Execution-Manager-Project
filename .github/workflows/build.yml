@@ -20,7 +20,7 @@ jobs:
             -dynamiclib -fobjc-arc -fvisibility=hidden -O2 -Wall \
             -I include -I src \
             src/*.m \
-            -framework Foundation -framework UIKit \
+            -framework Foundation -framework UIKit -framework CoreGraphics -framework QuartzCore \
             -install_name @rpath/DYNEX.dylib \
             -o build/DYNEX.dylib
           file build/DYNEX.dylib
