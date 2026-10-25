@@ -165,7 +165,6 @@ static UIWindow *DXFindGameWindow(UIWindow *except, BOOL keyOnly) {
 - (void)setDefaultFractionX:(CGFloat)fx y:(CGFloat)fy;
 - (void)applyFraction;
 - (void)setCount:(NSUInteger)n;
-- (void)sleepIfNeeded;
 - (void)wake;
 @end
 
@@ -317,27 +316,33 @@ static UIWindow *DXFindGameWindow(UIWindow *except, BOOL keyOnly) {
             self.center = [self clamp:CGPointMake(_panStart.x + t.x, _panStart.y + t.y)];
             break;
         }
-        case UIGestureRecognizerStateEnded: {
-            [UIView animateWithDuration:0.15 animations:^{
-                self.transform = CGAffineTransformIdentity;
-            }];
-            [self sleepIfNeeded];
-            break;
-        }
+        case UIGestureRecognizerStateEnded:
         case UIGestureRecognizerStateCancelled:
         case UIGestureRecognizerStateFailed: {
-            [UIView animateWithDuration:0.15 animations:^{
-                self.transform = CGAffineTransformIdentity;
-            }];
-            self.center = _panStart;
-            [self sleepIfNeeded];
+            [self snapToEdgeAndSave];
             break;
         }
-        default: {
+        default:
             break;
-        }
     }
-} // <--- Thêm dấu đóng ngoặc này vào là chuẩn chỉnh!
+}
+
+- (void)snapToEdgeAndSave {
+    UIView *sv = self.superview;
+    if (!sv) return;
+    UIEdgeInsets in = sv.safeAreaInsets;
+    CGRect b = sv.bounds;
+    CGFloat h = _size / 2, m = 6;
+    CGPoint c = self.center;
+    c.x = (c.x < b.size.width / 2) ? (in.left + m + h) : (b.size.width - in.right - m - h);
+    c = [self clamp:c];
+    [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5
+                        options:UIViewAnimationOptionAllowUserInteraction
+                     animations:^{ self.center = c; self.transform = CGAffineTransformIdentity; }
+                     completion:nil];
+    [self storeFraction];
+    [self wake];
+}
 
 - (void)setCount:(NSUInteger)n {
     if (!_main) return;
