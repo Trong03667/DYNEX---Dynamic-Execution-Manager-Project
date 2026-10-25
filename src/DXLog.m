@@ -88,10 +88,11 @@ void DXLogSetMinLevel(DXLogLevel level) {
 void DXLogWrite(DXLogLevel level, const char *tag, const char *fmt, ...) {
     if ((int)level < g_minLevel || g_logFd < 0) return;
 
+    if (!fmt) return;
     char msg[DX_LINE_MAX - 96];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(msg, sizeof(msg), fmt ? fmt : "", ap);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
     struct timespec ts;
