@@ -303,37 +303,39 @@ static UIWindow *DXFindGameWindow(UIWindow *except, BOOL keyOnly) {
     UIView *sv = self.superview;
     if (!sv) return;
     switch (g.state) {
-        case UIGestureRecognizerStateBegan:
+        case UIGestureRecognizerStateBegan: {
             _panStart = self.center;
             [self wake];
-            [UIView animateWithDuration:0.15 animations:^{ self.transform = CGAffineTransformMakeScale(1.1, 1.1); }];
+            [UIView animateWithDuration:0.15 animations:^{
+                self.transform = CGAffineTransformMakeScale(1.1, 1.1);
+            }];
             break;
+        }
         case UIGestureRecognizerStateChanged: {
             CGPoint t = [g translationInView:sv];
             self.center = [self clamp:CGPointMake(_panStart.x + t.x, _panStart.y + t.y)];
             break;
         }
-        case UIGestureRecognizerStateEnded:
-        case UIGestureRecognizerStateCancelled:
-        case UIGestureRecognizerStateFailed: {
-            UIEdgeInsets in = sv.safeAreaInsets;
-            CGRect b = sv.bounds;
-            CGFloat h = _size / 2, m = 6;
-            CGPoint c = self.center;
-            c.x = (c.x < b.size.width / 2) ? (in.left + m + h) : (b.size.width - in.right - m - h);
-            c = [self clamp:c];
-            [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0.5
-                                options:UIViewAnimationOptionAllowUserInteraction
-                             animations:^{ self.center = c; self.transform = CGAffineTransformIdentity; }
-                             completion:nil];
-            _panStart = c;
-            self.center = c;   /* giá trị đích để lưu */
-            [self storeFraction];
+        case UIGestureRecognizerStateEnded: {
+            [UIView animateWithDuration:0.15 animations:^{
+                self.transform = CGAffineTransformIdentity;
+            }];
+            [self sleepIfNeeded];
             break;
         }
-        default: break;
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            [UIView animateWithDuration:0.15 animations:^{
+                self.transform = CGAffineTransformIdentity;
+            }];
+            self.center = _panStart;
+            [self sleepIfNeeded];
+            break;
+        }
+        default: {
+            break;
+        }
     }
-}
 
 - (void)setCount:(NSUInteger)n {
     if (!_main) return;
