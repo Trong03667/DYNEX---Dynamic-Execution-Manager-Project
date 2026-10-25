@@ -151,7 +151,7 @@ static NSString *dx_clean_filename(NSString *name) {
         unichar c = [name characterAtIndex:i];
         BOOL ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
                   c == '.' || c == '_' || c == '-' || c == ' ' || c == '(' || c == ')';
-        [out appendFormat:@"%C", ok ? c : (unichar)'_'];
+					[out appendFormat:@"%C", (unichar)(ok ? c : '_')];
     }
     while ([out hasPrefix:@"."]) [out deleteCharactersInRange:NSMakeRange(0, 1)];
     return out;
