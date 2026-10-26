@@ -7,8 +7,11 @@
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <math.h>
+#include <libkern/OSByteOrder.h>
+#include <mach-o/dyld.h>
 #include <mach-o/fat.h>
 #include <mach-o/loader.h>
+#include <mach-o/nlist.h>
 #include <mach/machine.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -20,6 +23,7 @@ NSNotificationName const DXLoaderDidChangeNotification = @"DXLoaderDidChangeNoti
 #define DX_MAX_MANIFEST_BYTES  (64 * 1024)
 #define DX_MAX_CONTROLS        32
 #define DX_SAFE_SECONDS        60
+#define DX_RECENT_SECONDS      20
 
 #define DXC(s) [[(s) stringByReplacingOccurrencesOfString:@"\n" withString:@" | "] UTF8String]
 
@@ -127,11 +131,87 @@ static NSString *dx_check_macho(NSString *path, unsigned long long *sizeOut) {
     return @"Không phải file Mach-O 64-bit";
 }
 
+/* Quét bảng symbol (KHÔNG chạy mã của file) xem có xuất hàm dynex_manifest không.
+ * Mọi con số trong file đều được kiểm tra biên trước khi đọc. */
+static BOOL dx_has_dynex_symbol(NSString *path) {
+    NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+    if (data.length < sizeof(struct mach_header_64)) return NO;
+    const uint8_t *base = (const uint8_t *)data.bytes;
+    size_t total = data.length;
+    size_t sliceOff = 0, sliceLen = total;
+
+    uint32_t magic;
+    memcpy(&magic, base, sizeof(magic));
+    if (magic == FAT_CIGAM || magic == FAT_MAGIC) {
+        BOOL swap = (magic == FAT_CIGAM);
+        if (total < sizeof(struct fat_header)) return NO;
+        struct fat_header fh;
+        memcpy(&fh, base, sizeof(fh));
+        uint32_t n = swap ? OSSwapInt32(fh.nfat_arch) : fh.nfat_arch;
+        if (n == 0 || n > 8) return NO;
+        BOOL found = NO;
+        for (uint32_t i = 0; i < n; i++) {
+            size_t off = sizeof(struct fat_header) + (size_t)i * sizeof(struct fat_arch);
+            if (off + sizeof(struct fat_arch) > total) return NO;
+            struct fat_arch fa;
+            memcpy(&fa, base + off, sizeof(fa));
+            uint32_t ct = swap ? OSSwapInt32((uint32_t)fa.cputype) : (uint32_t)fa.cputype;
+            if ((cpu_type_t)ct != CPU_TYPE_ARM64) continue;
+            uint32_t o = swap ? OSSwapInt32(fa.offset) : fa.offset;
+            uint32_t s = swap ? OSSwapInt32(fa.size) : fa.size;
+            if ((uint64_t)o + (uint64_t)s > total) return NO;
+            sliceOff = o;
+            sliceLen = s;
+            found = YES;
+            break;
+        }
+        if (!found) return NO;
+    }
+    if (sliceLen < sizeof(struct mach_header_64)) return NO;
+    const uint8_t *slice = base + sliceOff;
+    struct mach_header_64 mh;
+    memcpy(&mh, slice, sizeof(mh));
+    if (mh.magic != MH_MAGIC_64) return NO;
+
+    size_t off = sizeof(mh);
+    for (uint32_t i = 0; i < mh.ncmds; i++) {
+        if (off + sizeof(struct load_command) > sliceLen) return NO;
+        struct load_command lc;
+        memcpy(&lc, slice + off, sizeof(lc));
+        if (lc.cmdsize < sizeof(lc) || off + lc.cmdsize > sliceLen) return NO;
+        if (lc.cmd == LC_SYMTAB) {
+            if (lc.cmdsize < sizeof(struct symtab_command)) return NO;
+            struct symtab_command sc;
+            memcpy(&sc, slice + off, sizeof(sc));
+            if ((uint64_t)sc.symoff + (uint64_t)sc.nsyms * sizeof(struct nlist_64) > sliceLen) return NO;
+            if ((uint64_t)sc.stroff + (uint64_t)sc.strsize > sliceLen) return NO;
+            const char *strtab = (const char *)(slice + sc.stroff);
+            static const char kWant[] = "_dynex_manifest";
+            const size_t wantLen = sizeof(kWant) - 1;
+            for (uint32_t k = 0; k < sc.nsyms; k++) {
+                struct nlist_64 nl;
+                memcpy(&nl, slice + sc.symoff + (size_t)k * sizeof(nl), sizeof(nl));
+                if (!(nl.n_type & N_EXT) || (nl.n_type & N_TYPE) != N_SECT) continue;
+                if (nl.n_un.n_strx >= sc.strsize) continue;
+                size_t maxLen = sc.strsize - nl.n_un.n_strx;
+                const char *s = strtab + nl.n_un.n_strx;
+                if (strnlen(s, maxLen) == wantLen && memcmp(s, kWant, wantLen) == 0) return YES;
+            }
+            return NO;
+        }
+        off += lc.cmdsize;
+    }
+    return NO;
+}
+
 static NSString *dx_dlopen_hint(NSString *raw) {
     NSString *l = raw.lowercaseString;
     if ([l containsString:@"code signature"] || [l containsString:@"not valid for use in process"] ||
         [l containsString:@"different team"] || [l containsString:@"library load disallowed"]) {
         return @"Dylib chưa ký đúng: phải ký cùng chứng chỉ với IPA (Esign).";
+    }
+    if ([l containsString:@"substrate"] || [l containsString:@"substitute"] || [l containsString:@"ellekit"]) {
+        return @"Dylib cần thư viện hook (Substrate/ElleKit) mà máy không jailbreak không có.";
     }
     if ([l containsString:@"symbol not found"]) {
         return @"Dylib cần hàm hoặc thư viện mà game không có (thiếu symbol).";
@@ -151,7 +231,7 @@ static NSString *dx_clean_filename(NSString *name) {
         unichar c = [name characterAtIndex:i];
         BOOL ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
                   c == '.' || c == '_' || c == '-' || c == ' ' || c == '(' || c == ')';
-					[out appendFormat:@"%C", (unichar)(ok ? c : '_')];
+        [out appendFormat:@"%C", (unichar)(ok ? c : '_')];
     }
     while ([out hasPrefix:@"."]) [out deleteCharactersInRange:NSMakeRange(0, 1)];
     return out;
@@ -219,6 +299,7 @@ static NSArray<NSDictionary *> *dx_sanitize_controls(id raw, NSString **err) {
 @property (nonatomic, readwrite, copy, nullable) NSString *errorMessage;
 @property (nonatomic, readwrite) BOOL enabled;
 @property (nonatomic, readwrite) unsigned long long fileSize;
+@property (nonatomic, readwrite) BOOL external;
 @property (nonatomic) void *handle;
 @property (nonatomic) DXSetEnabledFn fnSetEnabled;
 @property (nonatomic) DXSetOptionFn fnSetOption;
@@ -245,6 +326,9 @@ static NSArray<NSDictionary *> *dx_sanitize_controls(id raw, NSString **err) {
 }
 - (double)valueForOption:(NSString *)optionId {
     return [self.options[optionId] doubleValue];
+}
+- (BOOL)needsRestart {
+    return self.external && self.handle != NULL && !self.enabled;
 }
 @end
 
@@ -373,7 +457,11 @@ static NSMutableDictionary *dx_normalize_config(id raw) {
 }
 
 - (void)appWillBackground:(NSNotification *)n {
-    if (_started) [self writeConfigSync:YES];
+    if (!_started) return;
+    /* Thoát bình thường thì không phải crash: bỏ marker "mới nạp" để khỏi cô lập oan */
+    NSString *m = dx_marker_read();
+    if ([m hasSuffix:@"\trecent"]) dx_marker_clear();
+    [self writeConfigSync:YES];
 }
 
 - (NSMutableDictionary *)configForId:(NSString *)pid {
@@ -417,9 +505,11 @@ static NSMutableDictionary *dx_normalize_config(id raw) {
     if (marker.length) {
         NSArray *parts = [marker componentsSeparatedByString:@"\t"];
         if (parts.count == 2 && [parts[0] length]) {
-            quarantine[parts[0]] = parts[1];
-            [notes addObject:[NSString stringWithFormat:@"%@ làm crash lần trước (bước: %@), đã cô lập.", parts[0], parts[1]]];
-            DXLOGE("loader", "Cô lập %s do chết giữa bước %s", DXC(parts[0]), DXC(parts[1]));
+            NSString *step = [parts[1] isEqualToString:@"recent"] ? @"vừa được nạp chưa đầy 20 giây" : parts[1];
+            quarantine[parts[0]] = step;
+            [self configForId:parts[0]][@"enabled"] = @NO;
+            [notes addObject:[NSString stringWithFormat:@"%@ làm crash lần trước (%@), đã cô lập.", parts[0], step]];
+            DXLOGE("loader", "Cô lập %s do chết giữa bước %s", DXC(parts[0]), DXC(step));
         }
         dx_marker_clear();
     }
@@ -445,6 +535,7 @@ static NSMutableDictionary *dx_normalize_config(id raw) {
         for (NSString *f in files) {
             if ([report containsString:[NSString stringWithFormat:@" %@ +0x", f]]) {
                 quarantine[f] = @"crash";
+                [self configForId:f][@"enabled"] = @NO;
                 [notes addObject:[NSString stringWithFormat:@"Crash lần trước có dấu vết trong %@, đã cô lập.", f]];
             }
         }
@@ -506,7 +597,7 @@ static NSMutableDictionary *dx_normalize_config(id raw) {
     NSString *q = _config[@"quarantine"][fileName];
     if ([q isKindOfClass:[NSString class]]) {
         p.state = DXPluginStateQuarantined;
-        p.errorMessage = [NSString stringWithFormat:@"Bị cô lập vì làm crash lần trước (bước: %@). Bấm \"Thử lại\" để nạp lại.", q];
+        p.errorMessage = [NSString stringWithFormat:@"Bị cô lập vì làm crash lần trước (%@). Bấm \"Thử nạp lại\" để nạp lại.", q];
         DXLOGW("loader", "%s đang bị cô lập, bỏ qua", DXC(fileName));
         return p;
     }
@@ -520,11 +611,107 @@ static NSMutableDictionary *dx_normalize_config(id raw) {
     p.fileSize = size;
     if (err) { [self failPlugin:p message:err]; return p; }
 
+    /* Không có dynex_manifest: dylib thường, đóng băng cho tới khi người dùng bật */
+    if (!dx_has_dynex_symbol(path)) {
+        [self setupExternal:p];
+        return p;
+    }
+
     dx_marker_set(fileName, "load");
     [self performLoad:p path:path];
     dx_marker_clear();
     return p;
 }
+
+/* ---------------- Dylib ngoài (không theo chuẩn DYNEX) ---------------- */
+
+- (void)armRecentMarkerForFile:(NSString *)file {
+    NSString *expected = [NSString stringWithFormat:@"%@\trecent", file];
+    dx_marker_set(file, "recent");
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(DX_RECENT_SECONDS * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if ([dx_marker_read() isEqualToString:expected]) dx_marker_clear();
+    });
+}
+
+- (void)registerImageForPlugin:(DXPlugin *)p {
+    NSString *suffix = [@"/" stringByAppendingString:p.fileName];
+    uint32_t n = _dyld_image_count();
+    for (uint32_t i = 0; i < n; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (!name) continue;
+        NSString *s = [NSString stringWithUTF8String:name];
+        if ([s hasSuffix:suffix] && [s containsString:@"/DYNEX/plugins/"]) {
+            const struct mach_header *mh = _dyld_get_image_header(i);
+            if (mh) DXLogRegisterImage(p.fileName.UTF8String, mh);
+            return;
+        }
+    }
+}
+
+- (void)setupExternal:(DXPlugin *)p {
+    p.external = YES;
+    p.state = DXPluginStateLoaded;
+    p.errorMessage = nil;
+    p.enabled = NO;
+
+    NSMutableDictionary *pc = [self configForId:p.pluginId];
+    BOOL want = [pc[@"enabled"] boolValue];
+    if (want && _safeMode) {
+        pc[@"enabled"] = @NO;
+        want = NO;
+        [self scheduleSave];
+    }
+    DXLOGI("loader", "%s: dylib ngoài (không có dynex_manifest) - %s",
+           DXC(p.fileName), want ? "đã bật từ trước, nạp ngay" : "đóng băng, chưa nạp");
+    if (want) [self activateExternal:p];
+}
+
+/* dlopen dylib ngoài (nếu chưa nằm trong bộ nhớ) rồi đánh dấu bật */
+- (BOOL)activateExternal:(DXPlugin *)p {
+    if (p.handle) { p.enabled = YES; return YES; }   /* đã nằm sẵn trong bộ nhớ */
+
+    NSString *file = p.fileName;
+    const char *cfile = file.UTF8String;
+    NSString *path = [_pluginsDir stringByAppendingPathComponent:file];
+
+    dx_marker_set(file, "dlopen");
+    DXBreadcrumbBegin(cfile, "dlopen");
+    void *h = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
+    NSString *rawErr = nil;
+    if (!h) {
+        const char *de = dlerror();
+        rawErr = de ? [NSString stringWithUTF8String:de] : @"dlopen thất bại (không rõ lý do)";
+    }
+    DXBreadcrumbEnd();
+    dx_marker_clear();
+
+    if (!h) {
+        NSString *hint = dx_dlopen_hint(rawErr ?: @"");
+        [self failPlugin:p message:hint ? [NSString stringWithFormat:@"%@\n%@", hint, rawErr] : rawErr];
+        [self configForId:p.pluginId][@"enabled"] = @NO;
+        [self scheduleSave];
+        return NO;
+    }
+
+    p.handle = h;
+    DXLogEnsureHandlers();
+    [self registerImageForPlugin:p];
+
+    if (dlsym(h, "dynex_manifest")) {
+        /* Quét symbol bỏ sót (file bị strip): xử lý như plugin DYNEX */
+        DXLOGW("loader", "%s có dynex_manifest nhưng không thấy trong bảng symbol, chuyển sang chế độ plugin DYNEX", cfile);
+        p.external = NO;
+        [self finishManagedLoad:p handle:h];
+        return p.state == DXPluginStateLoaded;
+    }
+
+    p.enabled = YES;
+    [self armRecentMarkerForFile:file];
+    DXLOGI("loader", "Đã nạp dylib ngoài %s [BẬT]", cfile);
+    return YES;
+}
+
+/* ---------------- Plugin theo chuẩn DYNEX ---------------- */
 
 - (NSString *)applyManifest:(const char *)json toPlugin:(DXPlugin *)p {
     if (!json) return @"dynex_manifest trả về NULL";
@@ -581,8 +768,7 @@ static NSMutableDictionary *dx_normalize_config(id raw) {
 }
 
 - (void)performLoad:(DXPlugin *)p path:(NSString *)path {
-    NSString *file = p.fileName;
-    const char *cfile = file.UTF8String;
+    const char *cfile = p.fileName.UTF8String;
 
     /* dlopen: constructor của plugin chạy ngay ở đây */
     DXBreadcrumbBegin(cfile, "dlopen");
@@ -598,6 +784,14 @@ static NSMutableDictionary *dx_normalize_config(id raw) {
         [self failPlugin:p message:hint ? [NSString stringWithFormat:@"%@\n%@", hint, rawErr] : rawErr];
         return;
     }
+    [self finishManagedLoad:p handle:h];
+}
+
+/* Phần còn lại sau khi dlopen thành công: lấy hàm, đọc manifest, khôi phục tuỳ chọn, đặt trạng thái */
+- (void)finishManagedLoad:(DXPlugin *)p handle:(void *)h {
+    NSString *file = p.fileName;
+    const char *cfile = file.UTF8String;
+
     p.handle = h;
     DXLogEnsureHandlers();   /* lỡ plugin ghi đè bộ bắt crash */
 
@@ -678,11 +872,28 @@ static NSMutableDictionary *dx_normalize_config(id raw) {
 /* ---------------- Thao tác của người dùng ---------------- */
 
 - (BOOL)setEnabled:(BOOL)enabled forPlugin:(DXPlugin *)p {
-    if (![self requireMain:"setEnabled"] || p.state != DXPluginStateLoaded || !p.fnSetEnabled) return NO;
+    if (![self requireMain:"setEnabled"] || p.state != DXPluginStateLoaded) return NO;
     if (p.enabled == enabled) return YES;
-
-    DXSetEnabledFn fn = p.fnSetEnabled;
     const char *cfile = p.fileName.UTF8String;
+
+    /* Dylib ngoài: bật = nạp, tắt = chỉ ghi nhận (dylib còn trong RAM tới lần khởi động sau) */
+    if (p.external) {
+        if (enabled) {
+            if (![self activateExternal:p]) { [self postChange]; return NO; }
+            if (!p.external) return [self setEnabled:enabled forPlugin:p];   /* vừa nhận ra là plugin DYNEX */
+        } else {
+            p.enabled = NO;
+        }
+        [self configForId:p.pluginId][@"enabled"] = @(p.enabled);
+        [self scheduleSave];
+        DXLOGI("loader", "%s -> %s%s", cfile, p.enabled ? "BẬT" : "tắt",
+               (!p.enabled && p.handle) ? " (dylib vẫn trong bộ nhớ, cần khởi động lại game)" : "");
+        [self postChange];
+        return YES;
+    }
+
+    if (!p.fnSetEnabled) return NO;
+    DXSetEnabledFn fn = p.fnSetEnabled;
     dx_marker_set(p.fileName, enabled ? "enable" : "disable");
     DXBreadcrumbBegin(cfile, enabled ? "set_enabled(1)" : "set_enabled(0)");
     NSString *gerr = dx_guard(^{ fn(enabled); });
