@@ -607,7 +607,10 @@ static UIWindow *DXFindGameWindow(UIWindow *except, BOOL keyOnly) {
 
     NSString *status; UIColor *sc;
     switch (p.state) {
-        case DXPluginStateLoaded:      status = on ? @"● Đã nạp" : @"● Đang đóng băng"; sc = on ? kGreen : kMuted; break;
+        case DXPluginStateLoaded:
+            if (p.needsRestart) { status = @"● Chờ khởi động lại"; sc = kOrange; }
+            else { status = on ? @"● Đã nạp" : @"● Đang đóng băng"; sc = on ? kGreen : kMuted; }
+            break;
         case DXPluginStateQuarantined: status = @"● Bị cô lập"; sc = kOrange; break;
         default:                       status = @"● Lỗi"; sc = kRed; break;
     }
@@ -616,7 +619,8 @@ static UIWindow *DXFindGameWindow(UIWindow *except, BOOL keyOnly) {
         NSFontAttributeName: [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold]}];
     NSMutableString *tail = [NSMutableString string];
     if (p.fileSize) [tail appendFormat:@"  %@", [NSByteCountFormatter stringFromByteCount:(long long)p.fileSize countStyle:NSByteCountFormatterCountStyleFile]];
-    if (loaded && p.ownUI) [tail appendString:@"  ·  Giao diện riêng"];
+    if (loaded && p.external) [tail appendString:@"  ·  Dylib ngoài"];
+    else if (loaded && p.ownUI) [tail appendString:@"  ·  Giao diện riêng"];
     [as appendAttributedString:[[NSAttributedString alloc] initWithString:tail attributes:@{
         NSForegroundColorAttributeName: kMuted,
         NSFontAttributeName: [UIFont systemFontOfSize:11 weight:UIFontWeightRegular]}]];
@@ -625,8 +629,12 @@ static UIWindow *DXFindGameWindow(UIWindow *except, BOOL keyOnly) {
     _switch.enabled = loaded;
     if (_switch.isOn != on) [_switch setOn:on animated:animated];
 
-    BOOL hasMsg = p.errorMessage.length > 0;
-    _msgLabel.text = p.errorMessage;
+    NSString *msg = p.errorMessage;
+    if (!msg.length && p.needsRestart) {
+        msg = @"Đã tắt, nhưng dylib vẫn đang chạy trong bộ nhớ. Khởi động lại game để tắt hẳn.";
+    }
+    BOOL hasMsg = msg.length > 0;
+    _msgLabel.text = msg;
     _msgLabel.textColor = (p.state == DXPluginStateFailed) ? kRed : kOrange;
     BOOL showRetry = (p.state == DXPluginStateQuarantined);
     BOOL showControls = on && _built;
