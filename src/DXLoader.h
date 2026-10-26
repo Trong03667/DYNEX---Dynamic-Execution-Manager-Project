@@ -30,8 +30,13 @@ extern NSNotificationName const DXLoaderDidChangeNotification;
 @property (nonatomic, readonly, copy, nullable) NSString *errorMessage;
 @property (nonatomic, readonly) BOOL enabled;
 @property (nonatomic, readonly) unsigned long long fileSize;
+/// YES: dylib thường (không có dynex_manifest). DYNEX chỉ nạp/không nạp, không điều khiển được bên trong.
+@property (nonatomic, readonly) BOOL external;
+/// YES: dylib ngoài đã tắt nhưng vẫn nằm trong bộ nhớ, chỉ thôi chạy sau khi khởi động lại game.
+@property (nonatomic, readonly) BOOL needsRestart;
 - (double)valueForOption:(NSString *)optionId;
 @end
+
 
 /// Quản lý plugin. TẤT CẢ phương thức chỉ gọi trên main thread.
 @interface DXLoader : NSObject
