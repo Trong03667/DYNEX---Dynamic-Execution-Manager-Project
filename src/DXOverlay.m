@@ -504,6 +504,12 @@ static UIWindow *DXFindGameWindow(UIWindow *except, BOOL keyOnly) {
     DXPlugin *p = _p;
     [_controls addArrangedSubview:DXLine()];
 
+    if (p.external) {
+        [_controls addArrangedSubview:DXLabel(@"Dylib ngoài: DYNEX chỉ nạp nó, không điều khiển được bên trong. Dylib tự hiện giao diện của nó. Tắt công tắc chỉ có hiệu lực sau khi khởi động lại game.",
+                                              12, UIFontWeightRegular, kMuted)];
+        return;
+    }
+
     if (p.ownUI) {
         UILabel *n = DXLabel([NSString stringWithFormat:@"Tweak này có giao diện riêng. Bubble «%@» đã hiện trên màn hình, bấm vào để mở menu.", p.bubbleText],
                              12, UIFontWeightRegular, kMuted);
